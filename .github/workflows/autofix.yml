@@ -1,0 +1,91 @@
+# Mimicore automated bug fixing. This repository is public ONLY so GitHub Actions minutes are free; it holds no source code.
+# The private source is checked out with a deploy key at run time. Nothing from tickets or code is printed in these (public) logs.
+name: autofix
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "once = triage mail and fix tickets, status = only print queue counts"
+        default: once
+concurrency:
+  group: autofix
+  cancel-in-progress: false
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    # cheap Linux job: read support mail, then see whether any ticket is waiting
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      work: ${{ steps.q.outputs.work }}
+    env:
+      AUTOFIX_CI: "1"
+      OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
+      IMAP_PASS: ${{ secrets.IMAP_PASS }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: AnonymousAnny/Mimicore
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ref: develop
+          path: src
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install Claude Code
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' || env.ANTHROPIC_API_KEY != '' }}
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Read support mail
+        if: ${{ env.IMAP_PASS != '' && (env.CLAUDE_CODE_OAUTH_TOKEN != '' || env.ANTHROPIC_API_KEY != '') }}
+        run: python src/scripts/autofix/runner.py mail
+      - id: q
+        name: Anything waiting?
+        run: |
+          n=$(curl -s -X POST https://evhbtofegbkvmjagsuby.supabase.co/functions/v1/bug-queue -H "x-ops-token: $OPS_TOKEN" -H "content-type: application/json" -d '{"action":"stats"}' | python -c "import sys,json; d=json.load(sys.stdin); print(d.get('new',0)+d.get('fixing',0))")
+          echo "waiting tickets: $n"
+          if [ "$n" -gt 0 ] && [ "${{ github.event.inputs.mode }}" != "status" ]; then echo "work=yes" >> "$GITHUB_OUTPUT"; else echo "work=no" >> "$GITHUB_OUTPUT"; fi
+
+  fix:
+    needs: triage
+    if: needs.triage.outputs.work == 'yes'
+    runs-on: windows-latest   # the app is Windows-only: the real Rust tests need Windows
+    timeout-minutes: 150
+    env:
+      AUTOFIX_CI: "1"
+      OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AUTOFIX_WORK: ${{ github.workspace }}\work
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: AnonymousAnny/Mimicore
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ref: develop
+          path: src
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Tools
+        shell: bash
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          git -C src config user.name "Mimicore Autofix"
+          git -C src config user.email "autofix@users.noreply.github.com"
+          (cd src/app/desktop && npm ci --silent)
+          (cd src/website && npm ci --silent)
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: work/target
+          key: rust-${{ runner.os }}-${{ hashFiles('src/app/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+      - name: Fix tickets
+        shell: bash
+        run: python src/scripts/autofix/runner.py once
