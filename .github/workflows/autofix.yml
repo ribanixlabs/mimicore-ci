@@ -4,6 +4,8 @@ name: autofix
 on:
   schedule:
     - cron: "*/20 * * * *"
+  repository_dispatch:
+    types: [support-ticket]   # sent by the support edge function the moment a user opens a ticket (needs GH_DISPATCH_TOKEN there)
   workflow_dispatch:
     inputs:
       mode:
@@ -61,6 +63,7 @@ jobs:
       OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_ISSUES_TOKEN: ${{ secrets.GH_ISSUES_TOKEN }}   # optional: opens GitHub issues for validated support tickets
       AUTOFIX_WORK: ${{ github.workspace }}\work
     steps:
       - uses: actions/checkout@v4
