@@ -1,0 +1,8 @@
+{
+  "name": "mimicore-signer",
+  "private": true,
+  "description": "Pinned Tauri CLI used ONLY to sign installers in the beta workflow. Exact version + lockfile (integrity hashes); installed with --ignore-scripts.",
+  "dependencies": {
+    "@tauri-apps/cli": "2.12.1"
+  }
+}

@@ -1,0 +1,196 @@
+# Early builds (beta) in the cloud: when the fixer has merged fixes, build them, sign them and publish them on the pinned
+# prerelease `beta` of ribanixlabs/mimicore-app; the bug queue then e-mails the reporters to test.
+#
+# THE SIGNING KEY NEVER MEETS AI-WRITTEN CODE. Four jobs with separate, minimal powers:
+#   source   (deploy key, read only use) fetches `develop` and uploads a tarball; runs no code from it.
+#   build    (NO secrets, no token, no environment) compiles the code, including whatever the fixer wrote.
+#   sign     (environment `signing`: the key lives only there, only the `main` branch may use it) runs ONE pinned command,
+#            `tauri signer sign`, from a locked npm install of this repo; no repository code is executed.
+#   publish  (environment `publishing`: a token that can only write releases of mimicore-app) uploads the files.
+# There is no pull_request or fork trigger. Stable releases stay on the owner's PC (the key never leaves it for those).
+name: beta
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "yes = build even when no fix is waiting (test)"
+        default: "no"
+      publish:
+        description: "no = build and sign only, publish nothing (test)"
+        default: "yes"
+concurrency:
+  group: beta
+  cancel-in-progress: false
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.q.outputs.go }}
+    steps:
+      - id: q
+        env:
+          OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          n=$(curl -s -X POST https://evhbtofegbkvmjagsuby.supabase.co/functions/v1/bug-queue -H "x-ops-token: $OPS_TOKEN" -H "content-type: application/json" -d '{"action":"stats"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('fixed',0))")
+          echo "fixed tickets waiting for a beta: $n"
+          if [ "$n" -gt 0 ] || [ "$FORCE" = "yes" ]; then echo "go=yes" >> "$GITHUB_OUTPUT"; else echo "go=no" >> "$GITHUB_OUTPUT"; fi
+
+  source:
+    needs: check
+    if: needs.check.outputs.go == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      current: ${{ steps.v.outputs.current }}
+      snap: ${{ steps.snap.outputs.snap }}
+    steps:
+      - id: snap
+        run: echo "snap=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"   # fixes merged after this moment are not in this build
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ribanixlabs/Mimicore
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ref: develop
+          path: src
+          fetch-depth: 1
+          persist-credentials: false   # the key is removed from the runner right after the checkout
+      - id: v
+        run: |
+          set -e
+          read cur new < <(python3 ci/scripts/version.py next src)
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "current=$cur" >> "$GITHUB_OUTPUT"
+          python3 ci/scripts/version.py apply src "$new"
+          echo "early build $cur -> $new"
+      - run: tar -czf src.tgz -C src --exclude=.git --exclude=node_modules .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: source, path: src.tgz, retention-days: 2 }
+
+  build:
+    needs: source
+    runs-on: windows-latest   # the app is Windows-only
+    timeout-minutes: 90
+    permissions: {}           # no GITHUB_TOKEN powers; and no secrets are referenced anywhere in this job
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: source }
+      - shell: bash
+        run: mkdir src && tar -xzf src.tgz -C src
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 22 }
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: src/app/target
+          key: rust-beta-${{ runner.os }}-${{ hashFiles('src/app/Cargo.lock') }}
+          restore-keys: rust-beta-${{ runner.os }}-
+      - shell: bash
+        run: |
+          set -e
+          python src/scripts/fetch_runtime.py
+          (cd src/app/desktop && npm ci --silent)
+          # no updater signing here: the unsigned installer is signed by the next, separate job
+          (cd src/app/desktop && npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned
+          path: src/app/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 2
+
+  sign:
+    needs: [source, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: signing        # holds TAURI_SIGNING_PRIVATE_KEY; deployable from `main` only
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: unsigned, path: in }
+      - name: Install the pinned signer (lockfile, no install scripts)
+        run: npm ci --ignore-scripts --prefix ci/signer
+      - name: Sign
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          VERSION: ${{ needs.source.outputs.version }}
+        run: |
+          set -e
+          f="in/Mimicore_${VERSION}_x64-setup.exe"
+          test -f "$f"
+          ci/signer/node_modules/.bin/tauri signer sign "$f"
+          test -s "$f.sig"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed
+          path: |
+            in/*-setup.exe
+            in/*-setup.exe.sig
+          retention-days: 2
+
+  publish:
+    needs: [source, sign]
+    if: github.event.inputs.publish != 'no'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: publishing     # holds PUBLISH_TOKEN (writes releases of ribanixlabs/mimicore-app only)
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: signed, path: signed }
+      - env:
+          GH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
+          VERSION: ${{ needs.source.outputs.version }}
+          SNAP: ${{ needs.source.outputs.snap }}
+        run: python3 ci/scripts/publish_beta.py --version "$VERSION" --before "$SNAP" --dir signed
+
+  bump:
+    needs: [source, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ribanixlabs/Mimicore
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ref: develop
+          path: src
+          fetch-depth: 1
+      - env:
+          CURRENT: ${{ needs.source.outputs.current }}
+          NEW: ${{ needs.source.outputs.version }}
+        run: |
+          set -e
+          cd src
+          git config user.name "Mimicore Autofix"
+          git config user.email "autofix@users.noreply.github.com"
+          cur=$(python3 ../ci/scripts/version.py next . | cut -d' ' -f1)
+          if [ "$cur" != "$CURRENT" ]; then echo "develop moved to $cur (was $CURRENT): version bump skipped"; exit 0; fi
+          python3 ../ci/scripts/version.py apply . "$NEW"
+          git commit -qam "v$NEW: early build of bug fixes (published on the beta prerelease)"
+          git push -q origin HEAD:develop
