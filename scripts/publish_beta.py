@@ -32,6 +32,8 @@ def main():
     ap.add_argument("--before", required=True)
     ap.add_argument("--dir", required=True)
     ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--tag", default="beta", help="release tag (tests use another one)")
+    ap.add_argument("--no-queue", action="store_true", help="do not tell the bug queue (tests)")
     a = ap.parse_args()
     d = Path(a.dir)
     exe = d / f"Mimicore_{a.version}_x64-setup.exe"
@@ -43,26 +45,26 @@ def main():
         sys.exit("empty signature")
     feed = {"version": a.version, "notes": f"Early build {a.version} with the latest fixes.",
             "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-            "platforms": {"windows-x86_64": {"signature": signature, "url": f"https://github.com/{PUBLIC}/releases/download/beta/{exe.name}"}}}
+            "platforms": {"windows-x86_64": {"signature": signature, "url": f"https://github.com/{PUBLIC}/releases/download/{a.tag}/{exe.name}"}}}
     latest = d / "latest.json"
     latest.write_text(json.dumps(feed, indent=2))
     alias = d / "Mimicore-beta-setup.exe"
     alias.write_bytes(exe.read_bytes())
     note = NOTE.format(v=a.version)
 
-    have = subprocess.run(["gh", "release", "view", "beta", "-R", PUBLIC, "--json", "assets"], capture_output=True, text=True)
+    have = subprocess.run(["gh", "release", "view", a.tag, "-R", PUBLIC, "--json", "assets"], capture_output=True, text=True)
     if have.returncode != 0:
-        gh("release", "create", "beta", str(exe), str(sig), str(latest), str(alias), "-R", PUBLIC, "--prerelease", "--latest=false",
+        gh("release", "create", a.tag, str(exe), str(sig), str(latest), str(alias), "-R", PUBLIC, "--prerelease", "--latest=false",
            "--title", "Early builds (beta)", "--notes", note, dry=a.dry)
     else:
         old = [x["name"] for x in json.loads(have.stdout).get("assets", []) if x["name"].endswith("-setup.exe") or x["name"].endswith(".sig")]
-        gh("release", "upload", "beta", str(exe), str(sig), str(latest), str(alias), "-R", PUBLIC, "--clobber", dry=a.dry)
+        gh("release", "upload", a.tag, str(exe), str(sig), str(latest), str(alias), "-R", PUBLIC, "--clobber", dry=a.dry)
         for name in old:
             if name not in (exe.name, sig.name, alias.name):
-                gh("release", "delete-asset", "beta", name, "-R", PUBLIC, "--yes", check=False, dry=a.dry)
-        gh("release", "edit", "beta", "-R", PUBLIC, "--prerelease", "--latest=false", "--notes", note, dry=a.dry)
+                gh("release", "delete-asset", a.tag, name, "-R", PUBLIC, "--yes", check=False, dry=a.dry)
+        gh("release", "edit", a.tag, "-R", PUBLIC, "--prerelease", "--latest=false", "--notes", note, dry=a.dry)
     print("published early build", a.version)
-    if a.dry:
+    if a.dry or a.no_queue:
         return
     import os
     req = urllib.request.Request(QUEUE, json.dumps({"action": "beta_released", "version": a.version, "before": a.before}).encode(),
