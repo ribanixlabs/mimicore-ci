@@ -17,6 +17,12 @@ on:
       publish:
         description: "no = build only, publish nothing"
         default: "yes"
+      smoke:
+        description: "yes = start the built app on the runner and report"
+        default: "yes"
+      bench:
+        description: "yes = benchmark the voice engine on the Mac CPU"
+        default: "no"
 concurrency:
   group: mac
   cancel-in-progress: false
@@ -92,6 +98,61 @@ jobs:
           name: mac-dmg
           path: out/*.dmg
           if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    needs: build
+    if: github.event.inputs.smoke != 'no'
+    runs-on: macos-14
+    timeout-minutes: 15
+    permissions: {}   # runs the freshly built app: no secrets, no token
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: mac-dmg, path: dmg }
+      - run: bash ci/scripts/mac_smoke.sh dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: smoke-shot
+          path: shots/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  bench:
+    needs: source
+    if: github.event.inputs.bench == 'yes'
+    runs-on: macos-14
+    timeout-minutes: 150
+    permissions: {}   # no secrets: compiles the private source
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: source }
+      - run: mkdir src && tar -xzf src.tgz -C src
+      - run: python3 src/scripts/fetch_runtime.py --mac >> build.log 2>&1
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: src/app/target
+          key: rust-mac-bench-${{ runner.os }}-${{ hashFiles('src/app/Cargo.lock') }}
+          restore-keys: rust-mac-bench-${{ runner.os }}-
+      - name: Benchmark
+        run: python3 ci/scripts/mac_bench.py balanced fast
+      - name: Encrypt the compiler log
+        if: always()
+        run: bash ci/scripts/encrypt_log.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: benchlog
+          path: |
+            build.log.enc
+            k.enc
+          if-no-files-found: ignore
           retention-days: 7
 
   publish:
