@@ -65,10 +65,19 @@ voices = str(Path(os.environ.get("RUNNER_TEMP", "/tmp")).resolve() / "voices")
 shutil.rmtree(voices, ignore_errors=True)
 
 
-def cbx_run(pack, *args):
+def cbx_run(pack, *args, coreml=None):
     env = dict(os.environ, CBX_PACK=pack, CBX_DEVICE="cpu")
+    if coreml:  # experimental CoreML (GPU / Neural Engine) instead of the CPU
+        env.pop("CBX_DEVICE")
+        env["MIMICORE_COREML"] = "1"
+        env["MIMICORE_COREML_UNITS"] = coreml
     t = time.time()
-    p = subprocess.run([cbx, *args], cwd=SRC, env=env, capture_output=True, text=True, timeout=3000)
+    try:
+        p = subprocess.run([cbx, *args], cwd=SRC, env=env, capture_output=True, text=True, timeout=1500)
+    except subprocess.TimeoutExpired as e:
+        print(f"--- [{pack}] cbx {' '.join(args)}  TIMED OUT after 1500 s", flush=True)
+        print((e.stderr or b"").decode(errors="replace")[-600:] if isinstance(e.stderr, bytes) else (e.stderr or "")[-600:], flush=True)
+        return 1
     print(f"--- [{pack}] cbx {' '.join(args)}  (exit {p.returncode}, {time.time() - t:.0f}s)")
     print(p.stdout.strip())
     # stderr carries progress lines; keep the tail
@@ -100,4 +109,10 @@ for pid in packs:
     rc |= cbx_run(pid, "devices")
     rc |= cbx_run(pid, "enroll", "--audio", "models/ci_voice.wav", "--name", "ci", "--voices", voices)
     rc |= cbx_run(pid, "bench", "--auto", "--full", "--voice", "ci", "--voices", voices)
+
+if os.environ.get("COREML", "yes") == "yes":
+    for units in ("all", "gpu"):
+        print(f"=== CoreML experiment, compute units: {units} ===", flush=True)
+        cbx_run("balanced", "devices", coreml=units)
+        cbx_run("balanced", "bench", "--auto", "--voice", "ci", "--voices", voices, coreml=units)
 sys.exit(rc)
