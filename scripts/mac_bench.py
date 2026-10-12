@@ -77,11 +77,19 @@ def cbx_run(pack, *args):
     return p.returncode
 
 
+# enrolment needs at least 10 s of speech: the built-in 7.4 s sample played twice
+import wave
+with wave.open(str(SRC / "models" / "default_voice.wav")) as w:
+    params, frames = w.getparams(), w.readframes(w.getnframes())
+with wave.open(str(SRC / "models" / "ci_voice.wav"), "wb") as o:
+    o.setparams(params)
+    o.writeframes(frames + frames)
+
 print("=== machine ===", flush=True)
 subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string", "hw.ncpu", "hw.memsize"])
 rc = 0
 for pid in packs:
     rc |= cbx_run(pid, "devices")
-    rc |= cbx_run(pid, "enroll", "--audio", "models/default_voice.wav", "--name", "ci", "--voices", voices)
+    rc |= cbx_run(pid, "enroll", "--audio", "models/ci_voice.wav", "--name", "ci", "--voices", voices)
     rc |= cbx_run(pid, "bench", "--auto", "--full", "--voice", "ci", "--voices", voices)
 sys.exit(rc)
