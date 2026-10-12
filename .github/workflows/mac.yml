@@ -1,0 +1,122 @@
+# Mac beta build (Apple Silicon), run by hand: builds the app from a branch of the private repo on a free macOS runner and
+# publishes the .dmg on the prerelease `mac-beta` of THIS repository for testers.
+#
+# Same trust model as beta.yml: the build job has no secrets, no token and no environment. Because this repository and its
+# logs are public while the source is private, the build output is encrypted (scripts/mac_build.sh) and only the owner can read it.
+# The app is signed ad hoc (no Apple Developer account): testers open it with right-click > Open the first time.
+name: mac
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "branch of ribanixlabs/Mimicore to build"
+        default: "develop"
+      tests:
+        description: "yes = also run the engine tests"
+        default: "no"
+      publish:
+        description: "no = build only, publish nothing"
+        default: "yes"
+concurrency:
+  group: mac
+  cancel-in-progress: false
+permissions: {}
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ribanixlabs/Mimicore
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ref: ${{ github.event.inputs.ref }}
+          path: src
+          fetch-depth: 1
+          persist-credentials: false   # the key is removed from the runner right after the checkout
+      - id: v
+        run: echo "version=$(python3 -c "import json;print(json.load(open('src/app/desktop/src-tauri/tauri.conf.json'))['version'])")" >> "$GITHUB_OUTPUT"
+      - run: tar -czf src.tgz -C src --exclude=.git --exclude=node_modules .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: source, path: src.tgz, retention-days: 2 }
+
+  build:
+    needs: source
+    runs-on: macos-14   # Apple Silicon (M1)
+    timeout-minutes: 120
+    permissions: {}     # no GITHUB_TOKEN powers; no secrets are referenced anywhere in this job
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: source }
+      - run: mkdir src && tar -xzf src.tgz -C src
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 22 }
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: src/app/target
+          key: rust-mac-${{ runner.os }}-${{ hashFiles('src/app/Cargo.lock') }}
+          restore-keys: rust-mac-${{ runner.os }}-
+      - name: Build
+        env:
+          RUN_TESTS: ${{ github.event.inputs.tests }}
+        run: bash ci/scripts/mac_build.sh
+      - name: Collect
+        if: success()
+        run: |
+          mkdir out
+          cp src/app/target/release/bundle/dmg/*.dmg out/
+          ls -la out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: buildlog
+          path: |
+            build.log.enc
+            k.enc
+          if-no-files-found: ignore
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: success()
+        with:
+          name: mac-dmg
+          path: out/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [source, build]
+    if: github.event.inputs.publish != 'no'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # releases of this repository only
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: mac-dmg, path: dmg }
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.source.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          f=$(ls dmg/*.dmg | head -1)
+          notes="Mac beta of Mimicore $VERSION for Apple Silicon Macs (M1 or newer). Experimental: audio on a Mac is still being tested. Not notarized: open it with right-click > Open the first time. The virtual microphone needs the free BlackHole 2ch driver."
+          if gh release view mac-beta -R "$REPO" >/dev/null 2>&1; then
+            gh release delete-asset mac-beta "$(basename "$f")" -R "$REPO" -y 2>/dev/null || true
+            gh release upload mac-beta "$f" -R "$REPO" --clobber
+            gh release edit mac-beta -R "$REPO" --notes "$notes" --prerelease --latest=false
+          else
+            gh release create mac-beta "$f" -R "$REPO" --prerelease --latest=false --title "Mac beta (Apple Silicon)" --notes "$notes"
+          fi
+          echo "published $(basename "$f") on the mac-beta prerelease"
