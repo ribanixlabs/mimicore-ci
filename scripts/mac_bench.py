@@ -78,12 +78,20 @@ def cbx_run(pack, *args):
 
 
 # enrolment needs at least 10 s of speech: the built-in 7.4 s sample played twice
-import wave
-with wave.open(str(SRC / "models" / "default_voice.wav")) as w:
-    params, frames = w.getparams(), w.readframes(w.getnframes())
-with wave.open(str(SRC / "models" / "ci_voice.wav"), "wb") as o:
-    o.setparams(params)
-    o.writeframes(frames + frames)
+import struct
+raw = (SRC / "models" / "default_voice.wav").read_bytes()
+pos, out = 12, None
+while pos + 8 <= len(raw):
+    cid, size = raw[pos:pos + 4], struct.unpack("<I", raw[pos + 4:pos + 8])[0]
+    if cid == b"data":
+        data = raw[pos + 8:pos + 8 + size]
+        head = raw[12:pos]                      # fmt (and any other chunks before data)
+        body = head + b"data" + struct.pack("<I", size * 2) + data + data
+        out = b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + body
+        break
+    pos += 8 + size + (size & 1)
+assert out, "no data chunk"
+(SRC / "models" / "ci_voice.wav").write_bytes(out)
 
 print("=== machine ===", flush=True)
 subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string", "hw.ncpu", "hw.memsize"])
