@@ -40,6 +40,9 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 20 }
+      - name: Which AI providers work from here (manual status run)
+        if: ${{ github.event.inputs.mode == 'status' }}
+        run: python src/scripts/autofix/runner.py engine
       - name: Read support mail
         if: ${{ env.IMAP_PASS != '' && (env.GEMINI_API_KEY != '' || env.GROQ_API_KEY != '') }}
         run: python src/scripts/autofix/runner.py mail
