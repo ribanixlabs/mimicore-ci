@@ -28,8 +28,8 @@ jobs:
       AUTOFIX_CI: "1"
       OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
       IMAP_PASS: ${{ secrets.IMAP_PASS }}
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -40,17 +40,15 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 20 }
-      - name: Install Claude Code
-        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' || env.ANTHROPIC_API_KEY != '' }}
-        run: npm install -g @anthropic-ai/claude-code
       - name: Read support mail
-        if: ${{ env.IMAP_PASS != '' && (env.CLAUDE_CODE_OAUTH_TOKEN != '' || env.ANTHROPIC_API_KEY != '') }}
+        if: ${{ env.IMAP_PASS != '' && (env.GEMINI_API_KEY != '' || env.GROQ_API_KEY != '') }}
         run: python src/scripts/autofix/runner.py mail
       - id: q
         name: Anything waiting?
         run: |
           n=$(curl -s -X POST https://evhbtofegbkvmjagsuby.supabase.co/functions/v1/bug-queue -H "x-ops-token: $OPS_TOKEN" -H "content-type: application/json" -d '{"action":"stats"}' | python -c "import sys,json; d=json.load(sys.stdin); print(d.get('new',0)+d.get('fixing',0))")
           echo "waiting tickets: $n"
+          curl -s -o /dev/null -X POST https://evhbtofegbkvmjagsuby.supabase.co/functions/v1/bug-queue -H "x-ops-token: $OPS_TOKEN" -H "content-type: application/json" -d "{\"action\":\"fixer_beat\",\"runner\":\"ci\",\"waiting\":$n}" || true   # heartbeat for the admin panel
           if [ "$n" -gt 0 ] && [ "${{ github.event.inputs.mode }}" != "status" ]; then echo "work=yes" >> "$GITHUB_OUTPUT"; else echo "work=no" >> "$GITHUB_OUTPUT"; fi
 
   fix:
@@ -61,9 +59,8 @@ jobs:
     env:
       AUTOFIX_CI: "1"
       OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GH_ISSUES_TOKEN: ${{ secrets.GH_ISSUES_TOKEN }}   # optional: opens GitHub issues for validated support tickets
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       AUTOFIX_WORK: ${{ github.workspace }}\work
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -78,7 +75,6 @@ jobs:
       - name: Tools
         shell: bash
         run: |
-          npm install -g @anthropic-ai/claude-code
           git -C src config user.name "Mimicore Autofix"
           git -C src config user.email "autofix@users.noreply.github.com"
           (cd src/app/desktop && npm ci --silent)
