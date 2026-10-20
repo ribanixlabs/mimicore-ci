@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "once = triage mail and fix tickets, status = only print queue counts"
+        description: "once = triage mail and fix tickets, status = queue counts and which AI providers work, check = run the project checks on the Windows runner and report to the admin panel"
         default: once
 concurrency:
   group: autofix
@@ -52,7 +52,7 @@ jobs:
           n=$(curl -s -X POST https://evhbtofegbkvmjagsuby.supabase.co/functions/v1/bug-queue -H "x-ops-token: $OPS_TOKEN" -H "content-type: application/json" -d '{"action":"stats"}' | python -c "import sys,json; d=json.load(sys.stdin); print(d.get('new',0)+d.get('fixing',0))")
           echo "waiting tickets: $n"
           curl -s -o /dev/null -X POST https://evhbtofegbkvmjagsuby.supabase.co/functions/v1/bug-queue -H "x-ops-token: $OPS_TOKEN" -H "content-type: application/json" -d "{\"action\":\"fixer_beat\",\"runner\":\"ci\",\"waiting\":$n}" || true   # heartbeat for the admin panel
-          if [ "$n" -gt 0 ] && [ "${{ github.event.inputs.mode }}" != "status" ]; then echo "work=yes" >> "$GITHUB_OUTPUT"; else echo "work=no" >> "$GITHUB_OUTPUT"; fi
+          if { [ "$n" -gt 0 ] && [ "${{ github.event.inputs.mode }}" != "status" ]; } || [ "${{ github.event.inputs.mode }}" = "check" ]; then echo "work=yes" >> "$GITHUB_OUTPUT"; else echo "work=no" >> "$GITHUB_OUTPUT"; fi
 
   fix:
     needs: triage
@@ -90,4 +90,5 @@ jobs:
           restore-keys: rust-${{ runner.os }}-
       - name: Fix tickets
         shell: bash
-        run: python src/scripts/autofix/runner.py once
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "check" ]; then python src/scripts/autofix/runner.py selfcheck; else python src/scripts/autofix/runner.py once; fi
